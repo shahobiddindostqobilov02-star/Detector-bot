@@ -12,6 +12,7 @@ var config = new ConfigurationBuilder()
     .Build();
 
 var botToken = config["BotToken"]
+    ?? config["TELEGRAM_BOT_TOKEN"]
     ?? throw new InvalidOperationException("Token topilmadi!");
 
 var host = Host.CreateDefaultBuilder(args)
