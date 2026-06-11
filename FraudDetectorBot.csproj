@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>FraudDetectorBot</AssemblyName>
@@ -10,9 +10,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Telegram.Bot" Version="22.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
+<PackageReference Include="Telegram.Bot" Version="22.0.0" />
+<PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.0" />
   </ItemGroup>
 
 </Project>
