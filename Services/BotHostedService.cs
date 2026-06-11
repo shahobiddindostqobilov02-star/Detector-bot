@@ -3,51 +3,38 @@ using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
-using FraudDetectorBot.Handlers;
+using DetectorBotV2.Handlers;
 
-namespace FraudDetectorBot.Services;
+namespace DetectorBotV2.Services;
 
 public class BotHostedService : BackgroundService
 {
     private readonly ITelegramBotClient _bot;
-    private readonly MessageHandler _messageHandler;
+    private readonly MessageHandler _handler;
 
-    public BotHostedService(ITelegramBotClient bot, MessageHandler messageHandler)
+    public BotHostedService(ITelegramBotClient bot, MessageHandler handler)
     {
         _bot = bot;
-        _messageHandler = messageHandler;
+        _handler = handler;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        var me = await _bot.GetMe(stoppingToken);
+        var me = await _bot.GetMe(ct);
         Console.WriteLine($"✅ Bot ishga tushdi: @{me.Username}");
-        Console.WriteLine($"🛡️ Firibgarlikni Aniqlash Boti tayyor!");
+        Console.WriteLine($"🛡️ Firibgarlikni Aniqlash Boti v2.0 tayyor!");
 
-        var receiverOptions = new ReceiverOptions
-        {
-            AllowedUpdates = new[] { UpdateType.Message, UpdateType.CallbackQuery },
-            DropPendingUpdates = true
-        };
+        _bot.StartReceiving(
+            (bot, update, ct) => _handler.HandleUpdateAsync(update, ct),
+            (bot, ex, ct) => { Console.WriteLine($"❌ Xato: {ex.Message}"); return Task.CompletedTask; },
+            new ReceiverOptions
+            {
+                AllowedUpdates = new[] { UpdateType.Message, UpdateType.CallbackQuery },
+                DropPendingUpdates = true
+            },
+            ct
+        );
 
-_bot.StartReceiving(
-    HandleUpdateAsync,
-    HandleErrorAsync,
-    receiverOptions,
-    stoppingToken
-);
-
-        await Task.Delay(Timeout.Infinite, stoppingToken);
-    }
-
-    private async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
-    {
-        await _messageHandler.HandleUpdateAsync(update, ct);
-    }
-
-    private Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken ct)
-    {
-        Console.WriteLine($"❌ Telegram API xatosi: {exception.Message}");
-        return Task.CompletedTask;
+        await Task.Delay(Timeout.Infinite, ct);
     }
 }

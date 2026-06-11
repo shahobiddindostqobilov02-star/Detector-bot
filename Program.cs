@@ -1,9 +1,9 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Telegram.Bot;
-using FraudDetectorBot.Services;
-using FraudDetectorBot.Handlers;
-using Microsoft.Extensions.Configuration;
+using DetectorBotV2.Services;
+using DetectorBotV2.Handlers;
 
 var config = new ConfigurationBuilder()
     .SetBasePath(Directory.GetCurrentDirectory())
@@ -16,14 +16,14 @@ var botToken = config["BotToken"]
     ?? throw new InvalidOperationException("Token topilmadi!");
 
 var host = Host.CreateDefaultBuilder(args)
-    .ConfigureServices((context, services) =>
+    .ConfigureServices((_, services) =>
     {
         services.AddSingleton<ITelegramBotClient>(new TelegramBotClient(botToken));
         services.AddSingleton<FileAnalysisService>();
-        services.AddSingleton<VirusTotalService>();
-        services.AddSingleton<ReportService>();
-        services.AddHostedService<BotHostedService>();
+        services.AddSingleton<UrlAnalysisService>();
+        services.AddSingleton<DatabaseService>();
         services.AddSingleton<MessageHandler>();
+        services.AddHostedService<BotHostedService>();
     })
     .Build();
 

@@ -2,38 +2,34 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
-using FraudDetectorBot.Models;
-using FraudDetectorBot.Services;
+using DetectorBotV2.Models;
+using DetectorBotV2.Services;
 
-namespace FraudDetectorBot.Handlers;
+namespace DetectorBotV2.Handlers;
 
 public class MessageHandler
 {
-    // ==========================================
-// ADMIN ID LAR - @userinfobot dan oling
-// ==========================================
-private static readonly HashSet<long> AdminIds = new()
-{
-    8067524302,   // Sizning Telegram ID ingiz
-};
     private readonly ITelegramBotClient _bot;
-    private readonly FileAnalysisService _analysisService;
-    private readonly VirusTotalService _virusTotalService;
-    private readonly ReportService _reportService;
+    private readonly FileAnalysisService _fileService;
+    private readonly UrlAnalysisService _urlService;
+    private readonly DatabaseService _db;
 
-    // Faylni yuklab olishning maksimal hajmi (50MB)
-    private const long MaxFileSize = 50 * 1024 * 1024;
+    // Admin ID lar
+    private static readonly HashSet<long> AdminIds = new()
+    {
+        8067524302, // Admin
+    };
 
     public MessageHandler(
         ITelegramBotClient bot,
-        FileAnalysisService analysisService,
-        VirusTotalService virusTotalService,
-        ReportService reportService)
+        FileAnalysisService fileService,
+        UrlAnalysisService urlService,
+        DatabaseService db)
     {
         _bot = bot;
-        _analysisService = analysisService;
-        _virusTotalService = virusTotalService;
-        _reportService = reportService;
+        _fileService = fileService;
+        _urlService = urlService;
+        _db = db;
     }
 
     public async Task HandleUpdateAsync(Update update, CancellationToken ct)
@@ -47,325 +43,275 @@ private static readonly HashSet<long> AdminIds = new()
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Handler xatosi: {ex.Message}");
+            Console.WriteLine($"Xato: {ex.Message}");
         }
     }
 
-    private async Task HandleMessageAsync(Message message, CancellationToken ct)
+    private async Task HandleMessageAsync(Message msg, CancellationToken ct)
     {
-        var chatId = message.Chat.Id;
-        var userId = message.From?.Id ?? 0;
-        var username = message.From?.Username ?? message.From?.FirstName ?? "Foydalanuvchi";
+        var chatId = msg.Chat.Id;
+        var userId = msg.From?.Id ?? 0;
+        var username = msg.From?.Username ?? "";
+        var firstName = msg.From?.FirstName ?? "Foydalanuvchi";
 
-        // Buyruqlar
-        if (message.Type == MessageType.Text && message.Text != null)
+        // Foydalanuvchini ro'yxatga olish
+        _db.GetOrCreateUser(userId, username, firstName);
+
+        // Ban tekshirish
+        if (_db.IsUserBanned(userId) && !AdminIds.Contains(userId))
         {
-            var text = message.Text.Trim();
-
-            if (text.StartsWith("/start"))
-                await SendWelcomeAsync(chatId, username, ct);
-            else if (text.StartsWith("/help"))
-                await SendHelpAsync(chatId, ct);
-            else if (text.StartsWith("/stats"))
-                await SendUserStatsAsync(chatId, userId, username, ct);
-            else if (text.StartsWith("/globalstats"))
-{
-    if (!AdminIds.Contains(userId))
-    {
-        await _bot.SendMessage(chatId, "❌ Bu buyruq faqat adminlar uchun!", cancellationToken: ct);
-        return;
-    }
-    await SendGlobalStatsAsync(chatId, ct);
-}
-            else if (text.StartsWith("/threats"))
-                await SendRecentThreatsAsync(chatId, ct);
-            else if (text.StartsWith("/about"))
-                await SendAboutAsync(chatId, ct);
-            else
-                await _bot.SendMessage(chatId,
-                    "📎 Faylni menga yuboring, men uni tekshirib beraman.\n"
-                    + "❓ Yordam uchun: /help",
-                    cancellationToken: ct);
+            await _bot.SendMessage(chatId, "🚫 Siz botdan bloklangansiz.", cancellationToken: ct);
             return;
         }
 
-        // Fayl qabul qilish
+        // Matn xabarlar
+        if (msg.Type == MessageType.Text && msg.Text != null)
+        {
+            var text = msg.Text.Trim();
+
+            // Buyruqlar
+            if (text.StartsWith("/start")) { await SendMainMenu(chatId, firstName, ct); return; }
+            if (text.StartsWith("/help")) { await SendHelp(chatId, ct); return; }
+            if (text.StartsWith("/stats")) { await SendUserStats(chatId, userId, ct); return; }
+            if (text.StartsWith("/menu")) { await SendMainMenu(chatId, firstName, ct); return; }
+
+            // Admin buyruqlari
+            if (AdminIds.Contains(userId))
+            {
+                if (text.StartsWith("/admin")) { await SendAdminPanel(chatId, ct); return; }
+                if (text.StartsWith("/ban "))
+                {
+                    var banId = long.TryParse(text[5..].Trim(), out var id) ? id : 0;
+                    await BanUserCmd(chatId, banId, ct);
+                    return;
+                }
+                if (text.StartsWith("/unban "))
+                {
+                    var unbanId = long.TryParse(text[7..].Trim(), out var id) ? id : 0;
+                    await UnbanUserCmd(chatId, unbanId, ct);
+                    return;
+                }
+                if (text.StartsWith("/broadcast "))
+                {
+                    await BroadcastCmd(chatId, text[11..], ct);
+                    return;
+                }
+            }
+
+            // URL tekshirish
+            if (text.StartsWith("http://") || text.StartsWith("https://") ||
+                text.StartsWith("www.") || (text.Contains(".") && text.Contains("/") && !text.StartsWith("/")))
+            {
+                await AnalyzeUrlAsync(chatId, userId, username, firstName, text, ct);
+                return;
+            }
+
+            // Telegram username
+            if (text.StartsWith("@") && text.Length > 3)
+            {
+                await AnalyzeUsernameAsync(chatId, userId, username, firstName, text, ct);
+                return;
+            }
+
+            // Telefon raqam
+            if (Regex.IsMatch(text, @"^[\+\d\s\-\(\)]{7,15}$"))
+            {
+                await AnalyzePhoneAsync(chatId, userId, username, firstName, text, ct);
+                return;
+            }
+
+            // Boshqa matn
+            await _bot.SendMessage(chatId,
+                "📋 Menga quyidagilarni yuboring:\n\n"
+                + "📎 *Fayl* — virus tekshirish\n"
+                + "🔗 *Link* — URL tekshirish\n"
+                + "👤 *@username* — Telegram akkaunt\n"
+                + "📞 *Telefon raqam* — operator tekshirish\n\n"
+                + "Yoki /menu bosing",
+                parseMode: ParseMode.Markdown,
+                cancellationToken: ct);
+            return;
+        }
+
+        // Fayl tekshirish
         string? fileId = null;
         string? fileName = null;
         long fileSize = 0;
 
-        if (message.Type == MessageType.Document && message.Document != null)
+        if (msg.Type == MessageType.Document && msg.Document != null)
         {
-            fileId = message.Document.FileId;
-            fileName = message.Document.FileName ?? "nomsiz_fayl";
-            fileSize = message.Document.FileSize ?? 0;
-        }
-        else if (message.Type == MessageType.Photo && message.Photo != null)
-        {
-            // Rasm sifatida yuborilgan APK/EXE fayllar
-            var photo = message.Photo.LastOrDefault();
-            if (photo != null)
-            {
-                fileId = photo.FileId;
-                fileName = "image.jpg";
-                fileSize = photo.FileSize ?? 0;
-            }
+            fileId = msg.Document.FileId;
+            fileName = msg.Document.FileName ?? "nomsiz";
+            fileSize = msg.Document.FileSize ?? 0;
         }
 
-        if (fileId == null || fileName == null)
-        {
-            await _bot.SendMessage(chatId,
-                "⚠️ Iltimos, faylni *Dokument* sifatida yuboring.\n"
-                + "(Siqish yoki o'zgartirish bo'lmasligi uchun)",
-                parseMode: ParseMode.Markdown,
-                cancellationToken: ct);
-            return;
-        }
-
-        // Hajm tekshirish
-        if (fileSize > MaxFileSize)
-        {
-            await _bot.SendMessage(chatId,
-                $"❌ Fayl juda katta ({fileSize / 1024 / 1024} MB).\n"
-                + $"Maksimal: {MaxFileSize / 1024 / 1024} MB",
-                cancellationToken: ct);
-            return;
-        }
-
-        await AnalyzeFileAsync(chatId, userId, username, fileId, fileName, ct);
+        if (fileId != null && fileName != null)
+            await AnalyzeFileAsync(chatId, userId, username, firstName, fileId, fileName, fileSize, ct);
     }
 
-    private async Task AnalyzeFileAsync(
-        long chatId, long userId, string username,
-        string fileId, string fileName, CancellationToken ct)
+    // ==================== FAYL TAHLIL ====================
+    private async Task AnalyzeFileAsync(long chatId, long userId, string username, string firstName,
+        string fileId, string fileName, long fileSize, CancellationToken ct)
     {
-        // Kutish xabari
-        var waitMsg = await _bot.SendMessage(chatId,
-            "⏳ *Fayl tahlil qilinmoqda...*\n"
-            + "🔍 Virus va firibgarlik belgilari tekshirilmoqda...",
-            parseMode: ParseMode.Markdown,
-            cancellationToken: ct);
+        if (fileSize > 50 * 1024 * 1024)
+        {
+            await _bot.SendMessage(chatId, "❌ Fayl 50MB dan katta, qabul qilinmadi.", cancellationToken: ct);
+            return;
+        }
+
+        var wait = await _bot.SendMessage(chatId, "⏳ *Fayl tahlil qilinmoqda...*",
+            parseMode: ParseMode.Markdown, cancellationToken: ct);
 
         try
         {
-            // Faylni yuklab olish
-            byte[] fileBytes;
-            using (var memStream = new MemoryStream())
-            {
-                var tgFile = await _bot.GetFile(fileId, cancellationToken: ct);
-                await _bot.DownloadFile(tgFile.FilePath!, memStream, cancellationToken: ct);
-                fileBytes = memStream.ToArray();
-            }
+            byte[] bytes;
+            using var stream = new MemoryStream();
+            var tgFile = await _bot.GetFile(fileId, ct);
+            await _bot.DownloadFile(tgFile.FilePath!, stream, ct);
+            bytes = stream.ToArray();
 
-            // Asosiy tahlil
-            var result = await _analysisService.AnalyzeFileAsync(fileName, fileBytes);
+            var result = await _fileService.AnalyzeFileAsync(fileName, bytes);
+            _db.RecordScan(userId, username, firstName, fileName, "FILE", result.RiskLevel);
 
-            // VirusTotal tekshirish (agar API kalit bo'lsa)
-            if (_virusTotalService.IsAvailable && result.Sha256Hash != null)
-            {
-                await _bot.EditMessageText(chatId, waitMsg.MessageId,
-                    "⏳ *VirusTotal tekshirilmoqda...*",
-                    parseMode: ParseMode.Markdown,
-                    cancellationToken: ct);
-
-                var (found, detections, total) = await _virusTotalService.CheckHashAsync(result.Sha256Hash);
-                result.VirusTotalChecked = true;
-
-                if (found)
-                {
-                    result.VirusTotalDetections = detections;
-                    if (detections > 0)
-                    {
-                        result.DetectedThreats.Add($"🦠 VirusTotal: {detections}/{total} antivirus xavf aniqladi!");
-                    }
-                    else
-                    {
-                        result.SafeIndicators.Add($"✅ VirusTotal: {total} antivirusdan hech biri tahdid topmadi");
-                    }
-                }
-            }
-
-            // Statistika saqlash
-            _reportService.RecordScan(userId, username, fileName, result.RiskLevel);
-
-            // Natijani yuborish
-            await _bot.DeleteMessage(chatId, waitMsg.MessageId, ct);
-            await SendAnalysisResultAsync(chatId, result, ct);
+            await _bot.DeleteMessage(chatId, wait.MessageId, ct);
+            await SendAnalysisResult(chatId, result, ct);
         }
         catch (Exception ex)
         {
-            await _bot.EditMessageText(chatId, waitMsg.MessageId,
-                $"❌ Tahlil paytida xatolik: {ex.Message}",
-                cancellationToken: ct);
+            await _bot.EditMessageText(chatId, wait.MessageId, $"❌ Xatolik: {ex.Message}", cancellationToken: ct);
         }
     }
 
-    private async Task SendAnalysisResultAsync(long chatId, FileAnalysisResult result, CancellationToken ct)
+    // ==================== URL TAHLIL ====================
+    private async Task AnalyzeUrlAsync(long chatId, long userId, string username, string firstName,
+        string url, CancellationToken ct)
     {
-        var riskEmoji = result.RiskLevel switch
+        var wait = await _bot.SendMessage(chatId, "⏳ *Link tekshirilmoqda...*",
+            parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+        var result = _urlService.AnalyzeUrl(url);
+        _db.RecordScan(userId, username, firstName, url, "URL", result.RiskLevel);
+
+        await _bot.DeleteMessage(chatId, wait.MessageId, ct);
+        await SendAnalysisResult(chatId, result, ct);
+    }
+
+    // ==================== USERNAME TAHLIL ====================
+    private async Task AnalyzeUsernameAsync(long chatId, long userId, string username, string firstName,
+        string target, CancellationToken ct)
+    {
+        var result = _urlService.AnalyzeUsername(target);
+        _db.RecordScan(userId, username, firstName, target, "USERNAME", result.RiskLevel);
+        await SendAnalysisResult(chatId, result, ct);
+    }
+
+    // ==================== TELEFON TAHLIL ====================
+    private async Task AnalyzePhoneAsync(long chatId, long userId, string username, string firstName,
+        string phone, CancellationToken ct)
+    {
+        var result = _urlService.AnalyzePhone(phone);
+        _db.RecordScan(userId, username, firstName, phone, "PHONE", result.RiskLevel);
+        await SendAnalysisResult(chatId, result, ct);
+    }
+
+    // ==================== NATIJA YUBORISH ====================
+    private async Task SendAnalysisResult(long chatId, AnalysisResult result, CancellationToken ct)
+    {
+        var (emoji, text) = result.RiskLevel switch
         {
-            RiskLevel.Safe => "🟢",
-            RiskLevel.Low => "🟡",
-            RiskLevel.Medium => "🟠",
-            RiskLevel.High => "🔴",
-            RiskLevel.Critical => "☠️",
+            RiskLevel.Safe => ("🟢", "XAVFSIZ"),
+            RiskLevel.Low => ("🟡", "PAST XAVF"),
+            RiskLevel.Medium => ("🟠", "O'RTA XAVF"),
+            RiskLevel.High => ("🔴", "YUQORI XAVF"),
+            RiskLevel.Critical => ("☠️", "JUDA XAVFLI"),
+            _ => ("❓", "NOMA'LUM")
+        };
+
+        var typeEmoji = result.Type switch
+        {
+            "FILE" => "📄",
+            "URL" => "🔗",
+            "USERNAME" => "👤",
+            "PHONE" => "📞",
             _ => "❓"
         };
 
-        var riskText = result.RiskLevel switch
-        {
-            RiskLevel.Safe => "XAVFSIZ",
-            RiskLevel.Low => "PAST XAVF",
-            RiskLevel.Medium => "O'RTA XAVF",
-            RiskLevel.High => "YUQORI XAVF",
-            RiskLevel.Critical => "JUDA XAVFLI",
-            _ => "NOMA'LUM"
-        };
-
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"{riskEmoji} *{riskText}* {riskEmoji}");
+        sb.AppendLine($"{emoji} *{text}* {emoji}");
+        sb.AppendLine($"{typeEmoji} `{TruncateText(result.Target, 40)}`");
         sb.AppendLine();
-        sb.AppendLine($"📄 Fayl: `{result.FileName}`");
-        sb.AppendLine();
 
-        if (result.DetectedThreats.Any())
+        if (result.Threats.Any())
         {
-            sb.AppendLine("🚨 *Aniqlangan muammolar:*");
-            foreach (var threat in result.DetectedThreats.Take(5))
-                sb.AppendLine(threat);
+            sb.AppendLine("🚨 *Tahdidlar:*");
+            foreach (var t in result.Threats.Take(4)) sb.AppendLine(t);
             sb.AppendLine();
         }
 
-        if (result.SuspiciousIndicators.Any())
+        if (result.Warnings.Any())
         {
-            sb.AppendLine("⚠️ *Shubhali belgilar:*");
-            foreach (var ind in result.SuspiciousIndicators.Take(3))
-                sb.AppendLine(ind);
+            sb.AppendLine("⚠️ *Ogohlantirishlar:*");
+            foreach (var w in result.Warnings.Take(3)) sb.AppendLine(w);
             sb.AppendLine();
         }
 
-        if (result.SafeIndicators.Any() && result.RiskLevel <= RiskLevel.Low)
+        if (result.SafePoints.Any() && result.RiskLevel <= RiskLevel.Low)
         {
-            sb.AppendLine("✅ *Xavfsizlik belgilari:*");
-            foreach (var ind in result.SafeIndicators.Take(3))
-                sb.AppendLine(ind);
+            sb.AppendLine("✅ *Xavfsiz belgilar:*");
+            foreach (var s in result.SafePoints.Take(2)) sb.AppendLine(s);
             sb.AppendLine();
         }
 
-        sb.AppendLine("━━━━━━━━━━━━━━━━");
-        sb.AppendLine($"💡 *Tavsiya:*");
-        sb.AppendLine(result.Recommendation);
+        sb.AppendLine("━━━━━━━━━━━━━━");
+        sb.AppendLine($"💡 {result.Recommendation}");
 
-        if (result.VirusTotalChecked)
+        var keyboard = new InlineKeyboardMarkup(new[]
         {
-            sb.AppendLine();
-            sb.AppendLine(result.VirusTotalDetections > 0
-                ? $"🦠 VirusTotal: {result.VirusTotalDetections} ta antivirus tahdid aniqladi"
-                : "✅ VirusTotal: Tahdid topilmadi");
-        }
-
-        // Keyboard - foydalanuvchiga tanlov berish
-        InlineKeyboardMarkup? keyboard = null;
-
-        if (result.RiskLevel >= RiskLevel.Medium)
-        {
-            keyboard = new InlineKeyboardMarkup(new[]
+            new[]
             {
-                new[]
-                {
-                    InlineKeyboardButton.WithCallbackData("📖 Batafsil ma'lumot", $"detail_{result.Sha256Hash?[..8]}"),
-                    InlineKeyboardButton.WithCallbackData("📢 Firibgarlikni xabar qil", $"report_{result.Sha256Hash?[..8]}")
-                },
-                new[]
-                {
-                    InlineKeyboardButton.WithCallbackData("🛡️ Himoya maslahatlar", "safety_tips"),
-                }
-            });
-        }
-        else
-        {
-            keyboard = new InlineKeyboardMarkup(new[]
+                InlineKeyboardButton.WithCallbackData("🛡️ Maslahatlar", "tips"),
+                InlineKeyboardButton.WithCallbackData("📢 Xabar berish", "report")
+            },
+            new[]
             {
-                new[]
-                {
-                    InlineKeyboardButton.WithCallbackData("📖 Batafsil ma'lumot", $"detail_{result.Sha256Hash?[..8]}"),
-                }
-            });
-        }
+                InlineKeyboardButton.WithCallbackData("🏠 Bosh menyu", "mainmenu")
+            }
+        });
 
-        await _bot.SendMessage(chatId,
-            sb.ToString(),
-            parseMode: ParseMode.Markdown,
-            replyMarkup: keyboard,
-            cancellationToken: ct);
+        await _bot.SendMessage(chatId, sb.ToString(),
+            parseMode: ParseMode.Markdown, replyMarkup: keyboard, cancellationToken: ct);
     }
 
-    private async Task HandleCallbackAsync(CallbackQuery callback, CancellationToken ct)
-    {
-        var chatId = callback.Message?.Chat.Id ?? 0;
-        var data = callback.Data ?? "";
-
-        await _bot.AnswerCallbackQuery(callback.Id, cancellationToken: ct);
-
-        if (data == "safety_tips")
-        {
-            await _bot.SendMessage(chatId, GetSafetyTips(), parseMode: ParseMode.Markdown, cancellationToken: ct);
-        }
-        else if (data.StartsWith("report_"))
-        {
-            await _bot.SendMessage(chatId,
-                "📢 *Firibgarlik haqida xabar berish:*\n\n"
-                + "Bu faylni quyidagilarga xabar bering:\n"
-                + "• Kiberjinoyatlar bo'limi: *1102* (O'zbekiston)\n"
-                + "• Telegram: @telegram\n"
-                + "• https://www.virustotal.com\n\n"
-                + "Faylni HECH KIMGA yubormangg va o'chiring!",
-                parseMode: ParseMode.Markdown,
-                cancellationToken: ct);
-        }
-        else if (data.StartsWith("detail_"))
-        {
-            await _bot.SendMessage(chatId,
-                "🔍 *Batafsil ma'lumot:*\n\n"
-                + "Bot quyidagi usullar bilan faylni tekshiradi:\n"
-                + "• Kengaytma tahlili (EXE, APK, BAT va h.k.)\n"
-                + "• Ikki kengaytma hiylasi (photo.jpg.apk)\n"
-                + "• Unicode RLO hujumi aniqlash\n"
-                + "• Magic bytes tekshirish (ichki format)\n"
-                + "• Taniqli brend nomlarini suiiste'mol aniqlash\n"
-                + "• APK tarkibini tahlil qilish\n"
-                + "• VirusTotal integratsiyasi",
-                parseMode: ParseMode.Markdown,
-                cancellationToken: ct);
-        }
-    }
-
-    private async Task SendWelcomeAsync(long chatId, string username, CancellationToken ct)
+    // ==================== MENYULAR ====================
+    private async Task SendMainMenu(long chatId, string name, CancellationToken ct)
     {
         var text = $"""
-        👋 Salom, *{username}*!
-        
-        🛡️ *Firibgarlikni Aniqlash Boti*ga xush kelibsiz!
-        
-        Bu bot sizga shubhali fayllarni tekshirishda yordam beradi:
-        
-        📱 *Hozir ommalashgan xavflar:*
-        • "Sut'dan" deb yuboriladigan APK fayllar
-        • Soxta bank ilovalari (UzCard, Click, Payme)
-        • RLO hujumi (nomni teskari ko'rsatish)
-        • Ikki kengaytmali fayllar (foto.jpg.exe)
-        
-        📎 *Faylni yuboring* — men darhol tekshirib beraman!
-        
-        /help — Ko'rsatmalar
-        /stats — Sizning statistikangiz
+        👋 Salom, *{name}*!
+        🛡️ *Firibgarlikni Aniqlash Boti*
+
+        Menga quyidagilarni yuboring:
         """;
 
         var keyboard = new InlineKeyboardMarkup(new[]
         {
             new[]
             {
-                InlineKeyboardButton.WithCallbackData("🛡️ Xavfsizlik maslahatlar", "safety_tips")
+                InlineKeyboardButton.WithCallbackData("📎 Fayl tekshirish", "how_file"),
+                InlineKeyboardButton.WithCallbackData("🔗 Link tekshirish", "how_url")
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("👤 Username tekshirish", "how_user"),
+                InlineKeyboardButton.WithCallbackData("📞 Telefon tekshirish", "how_phone")
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("📊 Statistikam", "mystats"),
+                InlineKeyboardButton.WithCallbackData("🛡️ Maslahatlar", "tips")
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("ℹ️ Bot haqida", "about")
             }
         });
 
@@ -373,111 +319,285 @@ private static readonly HashSet<long> AdminIds = new()
             replyMarkup: keyboard, cancellationToken: ct);
     }
 
-    private async Task SendHelpAsync(long chatId, CancellationToken ct)
+    private async Task SendHelp(long chatId, CancellationToken ct)
     {
         var text = """
-        📖 *Yordam va ko'rsatmalar:*
-        
-        *Faylni qanday tekshirish:*
-        1️⃣ Shubhali faylni botga yuboring
-        2️⃣ Bot avtomatik tahlil qiladi
-        3️⃣ Natija va tavsiya olasiz
-        
+        📖 *Yordam:*
+
+        *Fayl tekshirish:*
+        Faylni bevosita botga yuboring (dokument sifatida)
+
+        *Link tekshirish:*
+        URL manzilni yuboring:
+        `https://example.com`
+
+        *Username tekshirish:*
+        `@username` yuboring
+
+        *Telefon tekshirish:*
+        `+998901234567` yuboring
+
         *Buyruqlar:*
         /start — Bosh menyu
-        /help — Shu yordam sahifasi
-        /stats — Sizning statistikangiz
-        /globalstats — Umumiy statistika
-        /threats — Oxirgi aniqlangan tahdidlar
-        /about — Bot haqida
-        
-        *Qanday fayllar xavfli:*
-        🔴 .exe, .msi — Windows viruslari
-        🔴 .apk, .xapk — Norasmiy Android ilovalar
-        🔴 .bat, .cmd, .ps1 — Skriptlar
-        🔴 .vbs, .js — Skript viruslari
-        🔴 Ikki kengaytmali fayllar
-        
-        *Muhim:* Faylni *Dokument* sifatida yuboring!
+        /stats — Statistikam
+        /help — Yordam
         """;
 
         await _bot.SendMessage(chatId, text, parseMode: ParseMode.Markdown, cancellationToken: ct);
     }
 
-    private async Task SendUserStatsAsync(long chatId, long userId, string username, CancellationToken ct)
+    private async Task SendUserStats(long chatId, long userId, CancellationToken ct)
     {
-        var text = _reportService.GetUserStatsMessage(userId, username);
+        var text = _db.GetUserStatsText(userId);
         await _bot.SendMessage(chatId, text, parseMode: ParseMode.Markdown, cancellationToken: ct);
     }
 
-    private async Task SendGlobalStatsAsync(long chatId, CancellationToken ct)
+    // ==================== ADMIN PANEL ====================
+    private async Task SendAdminPanel(long chatId, CancellationToken ct)
     {
-        var text = _reportService.GetGlobalStats();
-        await _bot.SendMessage(chatId, text, parseMode: ParseMode.Markdown, cancellationToken: ct);
+        var stats = _db.GetGlobalStats();
+        var text = $"""
+        🔐 *ADMIN PANEL*
+
+        👥 Jami foydalanuvchilar: *{stats.TotalUsers}*
+        🔍 Jami tekshirishlar: *{stats.TotalScans}*
+        🚨 Tahdidlar aniqlandi: *{stats.TotalThreats}*
+        📅 Bugun faol: *{stats.ActiveToday}* ta user
+        """;
+
+        var keyboard = new InlineKeyboardMarkup(new[]
+        {
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("👥 Foydalanuvchilar", "admin_users"),
+                InlineKeyboardButton.WithCallbackData("📊 Batafsil stat", "admin_stats")
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("🚨 Oxirgi tahdidlar", "admin_threats"),
+                InlineKeyboardButton.WithCallbackData("🏆 Top userlar", "admin_top")
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("📢 Xabar yuborish", "admin_broadcast"),
+            }
+        });
+
+        await _bot.SendMessage(chatId, text, parseMode: ParseMode.Markdown,
+            replyMarkup: keyboard, cancellationToken: ct);
     }
 
-    private async Task SendRecentThreatsAsync(long chatId, CancellationToken ct)
+    private async Task BanUserCmd(long chatId, long targetId, CancellationToken ct)
     {
-        var threats = _reportService.GetRecentThreats();
-        var text = threats.Any()
-            ? "🚨 *Oxirgi aniqlangan tahdidlar:*\n\n" + string.Join("\n", threats)
-            : "✅ Hozircha tahdid aniqlanmagan.";
-
-        await _bot.SendMessage(chatId, text, parseMode: ParseMode.Markdown, cancellationToken: ct);
+        if (targetId == 0) { await _bot.SendMessage(chatId, "❌ ID noto'g'ri. `/ban 123456789`", parseMode: ParseMode.Markdown, cancellationToken: ct); return; }
+        var success = _db.BanUser(targetId);
+        await _bot.SendMessage(chatId, success ? $"✅ User {targetId} bloklandi." : "❌ User topilmadi.", cancellationToken: ct);
     }
 
-    private async Task SendAboutAsync(long chatId, CancellationToken ct)
+    private async Task UnbanUserCmd(long chatId, long targetId, CancellationToken ct)
     {
-        var text = """
-        🤖 *Bot haqida:*
-        
-        *Firibgarlikni Aniqlash Boti v1.0*
-        
-        Bu bot O'zbekistonda keng tarqalgan firibgarlik usullaridan himoya qilish uchun yaratilgan.
-        
-        *Texnologiyalar:*
-        • C# / .NET 8
-        • Telegram.Bot kutubxonasi
-        • VirusTotal API (ixtiyoriy)
-        • SHA-256 kriptografiya
-        
-        *Aniqlash imkoniyatlari:*
-        ✅ 40+ xavfli fayl kengaytmasi
-        ✅ Ikki kengaytma hiylasi
-        ✅ Unicode RLO hujumi
-        ✅ Magic bytes tahlili
-        ✅ APK tarkib tahlili
-        ✅ Soxta brend nomlari
-        ✅ VirusTotal integratsiyasi
-        
-        ⚠️ Bot 100% kafolat bera olmaydi. 
-        Har doim ehtiyot bo'ling!
+        if (targetId == 0) { await _bot.SendMessage(chatId, "❌ ID noto'g'ri.", cancellationToken: ct); return; }
+        var success = _db.UnbanUser(targetId);
+        await _bot.SendMessage(chatId, success ? $"✅ User {targetId} blokdan chiqarildi." : "❌ User topilmadi.", cancellationToken: ct);
+    }
+
+    private async Task BroadcastCmd(long chatId, string message, CancellationToken ct)
+    {
+        var users = _db.GetAllUsers();
+        var sent = 0;
+        foreach (var user in users)
+        {
+            try
+            {
+                await _bot.SendMessage(user.UserId, $"📢 *Xabar:*\n\n{message}",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                sent++;
+                await Task.Delay(50, ct);
+            }
+            catch { }
+        }
+        await _bot.SendMessage(chatId, $"✅ Xabar {sent}/{users.Count} foydalanuvchiga yuborildi.", cancellationToken: ct);
+    }
+
+    // ==================== CALLBACK ====================
+    private async Task HandleCallbackAsync(CallbackQuery cb, CancellationToken ct)
+    {
+        var chatId = cb.Message?.Chat.Id ?? 0;
+        var userId = cb.From.Id;
+        var data = cb.Data ?? "";
+
+        await _bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
+
+        switch (data)
+        {
+            case "mainmenu":
+                await SendMainMenu(chatId, cb.From.FirstName, ct);
+                break;
+
+            case "mystats":
+                await SendUserStats(chatId, userId, ct);
+                break;
+
+            case "tips":
+                await _bot.SendMessage(chatId, GetSafetyTips(), parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "about":
+                await _bot.SendMessage(chatId, GetAboutText(), parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "report":
+                await _bot.SendMessage(chatId,
+                    "📢 *Firibgarlikni qayerga xabar berish:*\n\n"
+                    + "🇺🇿 Kiberjinoyatlar: *1102*\n"
+                    + "📧 Telegram: @notoscam\n"
+                    + "🌐 VirusTotal: https://virustotal.com",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "how_file":
+                await _bot.SendMessage(chatId,
+                    "📎 *Fayl tekshirish:*\n\nFaylni menga *Dokument* sifatida yuboring.\n_(Attach → File)_\n\nMax hajm: 50MB",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "how_url":
+                await _bot.SendMessage(chatId,
+                    "🔗 *Link tekshirish:*\n\nLink/URL manzilni yuboring:\n`https://example.com`\n`www.example.com`",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "how_user":
+                await _bot.SendMessage(chatId,
+                    "👤 *Username tekshirish:*\n\n@username ko'rinishida yuboring:\n`@uzcard_official`",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "how_phone":
+                await _bot.SendMessage(chatId,
+                    "📞 *Telefon tekshirish:*\n\nRaqamni yuboring:\n`+998901234567`\n`998901234567`",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            // Admin callbacklar
+            case "admin_stats" when AdminIds.Contains(userId):
+                await SendDetailedStats(chatId, ct);
+                break;
+
+            case "admin_users" when AdminIds.Contains(userId):
+                await SendUsersList(chatId, ct);
+                break;
+
+            case "admin_threats" when AdminIds.Contains(userId):
+                var threats = _db.GetRecentThreats(10);
+                var threatText = threats.Any()
+                    ? "🚨 *Oxirgi tahdidlar:*\n\n" + string.Join("\n", threats)
+                    : "✅ Tahdid topilmadi.";
+                await _bot.SendMessage(chatId, threatText, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "admin_top" when AdminIds.Contains(userId):
+                await SendTopUsers(chatId, ct);
+                break;
+
+            case "admin_broadcast" when AdminIds.Contains(userId):
+                await _bot.SendMessage(chatId,
+                    "📢 Xabar yuborish uchun:\n`/broadcast Xabar matni`",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+        }
+    }
+
+    private async Task SendDetailedStats(long chatId, CancellationToken ct)
+    {
+        var stats = _db.GetGlobalStats();
+        var users = _db.GetAllUsers();
+        var banned = users.Count(u => u.IsBanned);
+
+        var text = $"""
+        📊 *Batafsil statistika:*
+
+        👥 Jami userlar: *{stats.TotalUsers}*
+        🚫 Bloklangan: *{banned}*
+        🔍 Jami tekshirishlar: *{stats.TotalScans}*
+        🚨 Tahdidlar: *{stats.TotalThreats}*
+        📅 Bugun faol: *{stats.ActiveToday}*
         """;
 
         await _bot.SendMessage(chatId, text, parseMode: ParseMode.Markdown, cancellationToken: ct);
+    }
+
+    private async Task SendUsersList(long chatId, CancellationToken ct)
+    {
+        var users = _db.GetAllUsers().OrderByDescending(u => u.LastActivity).Take(10).ToList();
+        var sb = new System.Text.StringBuilder("👥 *Oxirgi faol foydalanuvchilar:*\n\n");
+
+        foreach (var u in users)
+        {
+            var status = u.IsBanned ? "🚫" : "✅";
+            sb.AppendLine($"{status} `{u.UserId}` @{u.Username} — {u.TotalScans} ta scan");
+        }
+
+        sb.AppendLine($"\n*Ban uchun:* `/ban USER_ID`");
+        await _bot.SendMessage(chatId, sb.ToString(), parseMode: ParseMode.Markdown, cancellationToken: ct);
+    }
+
+    private async Task SendTopUsers(long chatId, CancellationToken ct)
+    {
+        var top = _db.GetTopUsers(10);
+        var sb = new System.Text.StringBuilder("🏆 *Top foydalanuvchilar:*\n\n");
+        var i = 1;
+        foreach (var u in top)
+            sb.AppendLine($"{i++}. @{u.Username} — {u.TotalScans} ta scan ({u.ThreatsFound} tahdid)");
+
+        await _bot.SendMessage(chatId, sb.ToString(), parseMode: ParseMode.Markdown, cancellationToken: ct);
     }
 
     private static string GetSafetyTips() => """
         🛡️ *Xavfsizlik maslahatlar:*
-        
-        📱 *APK fayllar uchun:*
-        • Faqat Google Play Store'dan yuklab oling
-        • Noma'lum manbalardan o'rnatmang
-        • Bank ilovalarini rasmiy saytlardan toping
-        
-        💻 *Kompyuter fayllar uchun:*
-        • Noma'lumdan kelgan EXE fayllarni ochmang
-        • Antivirusni doim yangilab turing
-        • Muhim ma'lumotlarni zaxiralang
-        
-        📨 *Telegram/WhatsApp orqali:*
-        • "Sut'dan" degan fayllarni ochmang
-        • Taniqli brend nomidagi norasmiy fayllar xavfli
-        • Kutilmaganda kelgan arxivlarni tekshiring
-        
+
+        📱 *APK fayllar:*
+        • Faqat Google Play Store dan yuklab oling
+        • Noma'lum APK larga ishonmang
+
+        🔗 *Linklar:*
+        • HTTPS li linklar xavfsizroq
+        • Qisqa linklar (bit.ly) ga ehtiyot bo'ling
+        • Bank saytlarini qo'lda kiriting
+
+        💬 *Telegram:*
+        • Rasmiy kanallar ✅ belgisiga ega
+        • SMS kod so'ragan botlarga ishonmang
+        • @username ni tekshiring
+
         🏦 *Bank va to'lovlar:*
-        • Rasmiy ilovadan foydalaning
-        • SMS kod so'ragan saytlarga ishonmang
-        • Parolingizni hech kimga bermang
+        • PIN va parolni hech kimga bermang
+        • SMS kodni hech kim so'ramaydi
+        • Shubhali bo'lsa — bankga qo'ng'iring
         """;
+
+    private static string GetAboutText() => """
+        🤖 *Bot haqida:*
+
+        *Firibgarlikni Aniqlash Boti v2.0*
+
+        *Tekshirish imkoniyatlari:*
+        📎 Fayl — 40+ xavfli kengaytma
+        🔗 URL — phishing aniqlash
+        👤 Username — soxta akkaunt
+        📞 Telefon — operator tekshirish
+
+        *Texnologiyalar:*
+        • C# / .NET 9
+        • Telegram.Bot 22.0
+        • SHA-256 kriptografiya
+
+        ⚠️ Bot 100% kafolat bera olmaydi!
+        """;
+
+    private static string TruncateText(string text, int max) =>
+        text.Length > max ? text[..max] + "..." : text;
 }
+
+// Regex namespace
+using System.Text.RegularExpressions;
