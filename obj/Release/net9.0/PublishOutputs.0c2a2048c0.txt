@@ -1,0 +1,6 @@
+C:\Users\ANUBIS PC\Desktop\Detector bot\out\FraudDetectorBot.exe
+C:\Users\ANUBIS PC\Desktop\Detector bot\out\FraudDetectorBot.dll
+C:\Users\ANUBIS PC\Desktop\Detector bot\out\FraudDetectorBot.deps.json
+C:\Users\ANUBIS PC\Desktop\Detector bot\out\FraudDetectorBot.runtimeconfig.json
+C:\Users\ANUBIS PC\Desktop\Detector bot\out\FraudDetectorBot.pdb
+C:\Users\ANUBIS PC\Desktop\Detector bot\out\Telegram.Bot.dll
